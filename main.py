@@ -7,109 +7,67 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, UploadFile
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from pymongo import MongoClient
+import os
+import aiofiles
+from datetime import datetime
+# import pymongo
+
+
+
+
 
 from keras.models import load_model
 app = FastAPI()
 
 import tensorflow as tf
 # model = tf.keras.models.load_model('/kaggle/input/res-model/res_model.h5')
-model = tf.keras.models.load_model('./model/res_model.h5' , custom_objects={"f1_m": 0.9998})
+model = tf.keras.models.load_model('./model/third.h5')
+
+# Setting up mongodb atlas connection
+
+client = MongoClient("mongodb+srv://admin:admin@cluster0.qs1hl6j.mongodb.net")
+db = client["sih2023"]
 
 
-def noise(data, random=False, rate=0.035, threshold=0.075):
-    if random:
-        rate = np.random.random() * threshold
-    noise_amp = rate * np.random.uniform() * np.amax(data)
-    data = data + noise_amp * np.random.normal(size=data.shape[0])
-    return data
+def mfcc_extractor(audio,sample_rate):
+    mfccs_features = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=40)
+    mfccs_scaled_features = np.mean(mfccs_features.T,axis=0)
+    
+    return mfccs_scaled_features
 
-def stretch(data, rate=0.8):
-    return librosa.effects.time_stretch(data, rate=rate)
+def zcr_extractor(audio, sample_rate):
+    zcr_features = librosa.feature.zero_crossing_rate(y=audio)
+    zcr_scaled_features = np.mean(zcr_features.T,axis=0)
+    
+    return zcr_scaled_features
 
-def shift(data, rate=1000):
-    shift_range = int(np.random.uniform(low=-5, high=5) * rate)
-    return np.roll(data, shift_range)
+def srf_extractor(audio, sample_rate):
+    S, phase = librosa.magphase(librosa.stft(audio))
+    srf_features = librosa.feature.spectral_rolloff(S=S, sr=sample_rate)
+    srf_scaled_features = np.mean(srf_features.T,axis=0)
+    
+    return srf_scaled_features
 
-def pitch(data, sampling_rate, pitch_factor=0.7, random=False):
-    if random:
-        pitch_factor = np.random.random() * pitch_factor
-    return librosa.effects.pitch_shift(data, sr=sampling_rate, n_steps=pitch_factor)
+def flux_extractor(audio, sample_rate):
+    flux_features = librosa.onset.onset_strength(y=audio, sr=sample_rate)
+    flux_scaled_features = np.mean(flux_features.T,axis=0)
+    
+    return flux_scaled_features
 
-def chunks(data, frame_length, hop_length):
-    for i in range(0, len(data), hop_length):
-        yield data[i:i + frame_length]
+def chroma_extractor(audio,sample_rate):
+    chroma_features = librosa.feature.chroma_stft(y=audio, sr=sample_rate)
+    chroma_scaled_features = np.mean(chroma_features.T,axis=0)
+    
+    return chroma_scaled_features
 
-def zcr(data, frame_length=2048, hop_length=512):
-    zcr = librosa.feature.zero_crossing_rate(y=data, frame_length=frame_length, hop_length=hop_length)
-    return np.squeeze(zcr)
+def single_val(data):
+    return data[0]
 
-def energy(data, frame_length=2048, hop_length=512):
-    en = np.array([np.sum(np.power(np.abs(data[hop:hop+frame_length]), 2)) for hop in range(0, data.shape[0], hop_length)])
-    return en / frame_length
-
-def rmse(data, frame_length=2048, hop_length=512):
-    rmse = librosa.feature.rms(y=data, frame_length=frame_length, hop_length=hop_length)
-    return np.squeeze(rmse)
-
-def entropy_of_energy(data, frame_length=2048, hop_length=512):
-    energies = energy(data, frame_length, hop_length)
-    energies /= np.sum(energies)
-    entropy = -energies * np.log2(energies)
-    return entropy
-
-def spc(data, sr, frame_length=2048, hop_length=512):
-    spectral_centroid = librosa.feature.spectral_centroid(y=data, sr=sr, n_fft=frame_length, hop_length=hop_length)
-    return np.squeeze(spectral_centroid)
-
-def spc_flux(data):
-    isSpectrum = data.ndim == 1
-    if isSpectrum:
-        data = np.expand_dims(data, axis=1)
-    X = np.c_[data[:, 0], data]
-    af_Delta_X = np.diff(X, 1, axis=1)
-    vsf = np.sqrt((np.power(af_Delta_X, 2).sum(axis=0))) / X.shape[0]
-    return np.squeeze(vsf) if isSpectrum else vsf
-
-def spc_rollof(data, sr, frame_length=2048, hop_length=512):
-    spcrollof = librosa.feature.spectral_rolloff(y=data, sr=sr, n_fft=frame_length, hop_length=hop_length)
-    return np.squeeze(spcrollof)
-
-def chroma_stft(data, sr, frame_length=2048, hop_length=512, flatten: bool = True):
-    stft = np.abs(librosa.stft(data))
-    chroma_stft = librosa.feature.chroma_stft(S=stft, sr=sr)
-    return np.squeeze(chroma_stft.T) if not flatten else np.ravel(chroma_stft.T)
-
-def mel_spc(data, sr, frame_length=2048, hop_length=512, flatten: bool = True):
-    mel = librosa.feature.melspectrogram(y=data, sr=sr)
-    return np.squeeze(mel.T) if not flatten else np.ravel(mel.T)
-
-def mfcc(data, sr, frame_length=2048, hop_length=512, flatten: bool = True):
-    mfcc_feature = librosa.feature.mfcc(y=data, sr=sr)
-    return np.squeeze(mfcc_feature.T) if not flatten else np.ravel(mfcc_feature.T)
-
-def extract_features(data, sr, frame_length=2048, hop_length=512):
-    result = np.array([])
-    result = np.hstack((result,
-                        zcr(data, frame_length, hop_length),
-                        rmse(data, frame_length, hop_length),
-                        mfcc(data, sr, frame_length, hop_length)))
-    return result
-
-def get_features(path, duration=2.5, offset=0.6):
-    data, sample_rate = librosa.load(path, duration=duration, offset=offset)
-    res1 = extract_features(data, sample_rate)
-    result = np.array(res1)
-    noise_data = noise(data, random=True)
-    res2 = extract_features(noise_data, sample_rate)
-    result = np.vstack((result, res2))
-    pitched_data = pitch(data, sample_rate, random=True)
-    res3 = extract_features(pitched_data, sample_rate)
-    result = np.vstack((result, res3))
-    return result
-
-def predict_emotion(audio_file):
+# audio, sample_rate = librosa.load(filename) 
+def ip(file, third_model):
     emos = {
-        0: "angry",
+        0: "angry", 
         1: "disgust",
         2: "fear",
         3: "happy",
@@ -117,41 +75,63 @@ def predict_emotion(audio_file):
         5: "sad",
         6: "surprise"
     }
-    
-    features = get_features(audio_file)
-    new_ip = [ele for ele in features]
-    
-    extracted_df = pd.DataFrame(new_ip)
-    extracted_df = extracted_df.fillna(0)
-    
-    mm = MinMaxScaler()
-    scaler = StandardScaler()
-    extracted_df = mm.fit_transform(extracted_df)
-    extracted_df = scaler.fit_transform(extracted_df)
-    extracted_df = np.expand_dims(extracted_df, axis=2)
-    
-    y_pred = model.predict(extracted_df)
-    y_pred = np.argmax(y_pred, axis=1)
-    score = math.floor(sum(y_pred) / 3)
-    return emos[score]
+    data, sr = librosa.load(file)
+    extracted_features = []
+    mfcc = mfcc_extractor(data,sr)
+    zcr = zcr_extractor(data,sr)
+    srf = srf_extractor(data,sr)
+    flux = flux_extractor(data,sr)
+    chroma = chroma_extractor(data,sr)
+    extracted_features.append([mfcc,zcr,srf,flux,chroma])
+    new_ip=pd.DataFrame(extracted_features,columns=['mfcc','zcr','srf','flux', 'chroma'])
+    new_ip['zcr'] = new_ip['zcr'].apply(single_val)
+    new_ip['srf'] = new_ip['srf'].apply(single_val)
+    ss = StandardScaler()
+    new_ip[['zcr', 'srf', 'flux']] = ss.fit_transform(new_ip[['zcr', 'srf', 'flux']])
+    new_ip_mfcc=np.array(new_ip['mfcc'].tolist())
+    new_ip_zcr=np.array(new_ip['zcr'].tolist()).reshape(-1,1)
+    new_ip_srf=np.array(new_ip['srf'].tolist()).reshape(-1,1)
+    new_ip_flux=np.array(new_ip['flux'].tolist()).reshape(-1,1)
+    new_ip_chroma=np.array(new_ip['chroma'].tolist())
+    new_ip_X = np.concatenate((new_ip_mfcc, new_ip_zcr, new_ip_srf, new_ip_flux, new_ip_chroma), axis=1)
+    # print(new_ip_X.shape)
+    #print(mfccs_scaled_features)
+    #mfccs_scaled_features=mfccs_scaled_features.reshape(1,-1)
+    #print(mfccs_scaled_features)
+    #print(mfccs_scaled_features.shape)
+    predicted_label=third_model.predict(new_ip_X)
+    predicted_label = predicted_label.reshape(-1)
+    print(predicted_label)
+    ind = np.argmax(predicted_label)
+    print(np.argmax(predicted_label))
+    return emos[ind]
+
 
 @app.post("/predict/")
 async def predict_audio_emotion(file: UploadFile):
-    if not file.filename.endswith('.wav'):
-        return {"error": "Only WAV files are supported."}
+    try:
+        # Create a temporary file to save the uploaded data
+        temp_filename = 'temp.wav'
+        async with aiofiles.open(temp_filename, 'wb') as temp_file:
+            # Iterate over the file content in chunks and write it to the temporary file
+            while chunk := await file.read(1024):
+                await temp_file.write(chunk)
+
+        # Make predictions
+        emotion = ip(temp_filename, model)
+
+        # Clean up the temporary file
+        os.remove(temp_filename)
+
+        # Return the emotion prediction
+        return {"emotion": emotion}
+    except Exception as e:
+        # Log the error for debugging
+        print(f"An error occurred: {str(e)}")
+        return {"error": "An error occurred during audio processing."}
+
     
-    # Save the uploaded file temporarily
-    with open('temp.wav', 'wb') as f:
-        f.write(file.file.read())
-    
-    # Make predictions
-    audio_file = 'temp.wav'
-    emotion = predict_emotion(audio_file)
-    
-    # Clean up the temporary file
-    os.remove(audio_file)
-    
-    return {"emotion": emotion}
+
 
 if __name__ == "__main__":
     import uvicorn
